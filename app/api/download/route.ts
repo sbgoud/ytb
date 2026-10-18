@@ -1,12 +1,11 @@
 import { spawn } from "node:child_process";
-import { createReadStream } from "node:fs";
-import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
+import { createReadStream, existsSync } from "node:fs";
+import { mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import ffmpegStatic from "ffmpeg-static";
 
-export const maxDuration = 60;
-
-const YT_DLP_PATH = process.env.YT_DLP_PATH ?? "yt-dlp";
+export const maxDuration = 300;
 
 const ALLOWED_HOSTS = new Set([
   "youtube.com",
@@ -29,27 +28,69 @@ function isAllowedUrl(value: string): boolean {
   }
 }
 
+function bundledBinary(name: string): string | null {
+  const candidate = path.join(
+    process.cwd(),
+    "bin",
+    process.platform === "win32" ? `${name}.exe` : name
+  );
+  return existsSync(candidate) ? candidate : null;
+}
+
+function resolveYtDlpPath(): string {
+  return process.env.YT_DLP_PATH ?? bundledBinary("yt-dlp") ?? "yt-dlp";
+}
+
+function resolveFfmpegLocation(): string | null {
+  if (process.env.FFMPEG_PATH) return process.env.FFMPEG_PATH;
+  return ffmpegStatic && existsSync(ffmpegStatic) ? ffmpegStatic : null;
+}
+
+async function writeCookiesFile(workDir: string): Promise<string | null> {
+  const raw = process.env.YT_DLP_COOKIES?.trim();
+  if (!raw) return null;
+  const content = raw.startsWith("#")
+    ? raw
+    : Buffer.from(raw, "base64").toString("utf8");
+  const cookiesPath = path.join(workDir, "cookies.txt");
+  await writeFile(cookiesPath, content);
+  return cookiesPath;
+}
+
+type DownloadOptions = {
+  url: string;
+  outputTemplate: string;
+  ytDlpPath: string;
+  ffmpegLocation: string | null;
+  cookiesPath: string | null;
+};
+
 function runYtDlp(
-  url: string,
-  outputTemplate: string
+  options: DownloadOptions
 ): Promise<{ code: number | null; stderr: string }> {
+  const args = [
+    "--no-playlist",
+    "--no-progress",
+    "--extract-audio",
+    "--audio-format",
+    "mp3",
+    "--audio-quality",
+    "5",
+    "--output",
+    options.outputTemplate,
+  ];
+  if (options.ffmpegLocation) {
+    args.push("--ffmpeg-location", options.ffmpegLocation);
+  }
+  if (options.cookiesPath) {
+    args.push("--cookies", options.cookiesPath);
+  }
+  args.push(options.url);
+
   return new Promise((resolve, reject) => {
-    const child = spawn(
-      /* turbopackIgnore: true */ YT_DLP_PATH,
-      [
-        "--no-playlist",
-        "--no-progress",
-        "--extract-audio",
-        "--audio-format",
-        "mp3",
-        "--audio-quality",
-        "5",
-        "--output",
-        outputTemplate,
-        url,
-      ],
-      { stdio: ["ignore", "ignore", "pipe"] }
-    );
+    const child = spawn(/* turbopackIgnore: true */ options.ytDlpPath, args, {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
 
     let stderr = "";
     child.stderr.on("data", (chunk: string | Buffer) => {
@@ -91,7 +132,9 @@ function fileStream(
   return new ReadableStream<Uint8Array>({
     start(controller) {
       stream.on("data", (chunk: string | Buffer) =>
-        controller.enqueue(typeof chunk === "string" ? Buffer.from(chunk) : chunk)
+        controller.enqueue(
+          typeof chunk === "string" ? Buffer.from(chunk) : chunk
+        )
       );
       stream.on("end", () => {
         controller.close();
@@ -146,7 +189,13 @@ export async function POST(request: Request) {
   let handedOff = false;
   try {
     const outputTemplate = path.join(workDir, "%(title)s.%(ext)s");
-    const { code, stderr } = await runYtDlp(url, outputTemplate);
+    const { code, stderr } = await runYtDlp({
+      url,
+      outputTemplate,
+      ytDlpPath: resolveYtDlpPath(),
+      ffmpegLocation: resolveFfmpegLocation(),
+      cookiesPath: await writeCookiesFile(workDir),
+    });
 
     if (code !== 0) {
       return Response.json({ error: errorFromStderr(stderr) }, { status: 422 });
@@ -184,7 +233,7 @@ export async function POST(request: Request) {
       return Response.json(
         {
           error:
-            "yt-dlp is not installed on the server. Install it (e.g. brew install yt-dlp) or set YT_DLP_PATH.",
+            "yt-dlp binary not found. Locally, install yt-dlp or run `npm run fetch-ytdlp`; on Vercel it is fetched during build.",
         },
         { status: 500 }
       );

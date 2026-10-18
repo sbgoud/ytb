@@ -36,6 +36,9 @@ yarn-error.log*
 # vercel
 .vercel
 
+# fetched yt-dlp binary
+/bin
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

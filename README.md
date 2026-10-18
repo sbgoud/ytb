@@ -7,16 +7,18 @@ audio back as an MP3 file (medium quality, ~130 kbps VBR, converted with
 ## Requirements
 
 - Node.js 20+
-- `yt-dlp` on `PATH` (keep it updated — YouTube changes often break old
-  versions: `brew upgrade yt-dlp` or `yt-dlp -U`)
-- `ffmpeg` on `PATH` (needed for the MP3 conversion)
+- yt-dlp — either on `PATH` (`brew install yt-dlp`), or run
+  `npm run fetch-ytdlp` once to download a standalone binary into `bin/`.
+  Keep it fresh: old versions break when YouTube changes.
+- ffmpeg — no install needed; the `ffmpeg-static` package ships a binary.
 
-If `yt-dlp` lives somewhere else, point `YT_DLP_PATH` at it.
+Optional environment overrides: `YT_DLP_PATH`, `FFMPEG_PATH`.
 
 ## Development
 
 ```bash
 npm install
+npm run fetch-ytdlp   # optional if yt-dlp is already on your PATH
 npm run dev
 ```
 
@@ -27,23 +29,39 @@ hit the button. The first conversion can take a few seconds.
 
 - `app/page.tsx` — URL form; POSTs to the API and saves the returned MP3 blob.
 - `app/api/download/route.ts` — validates the URL (youtube.com / youtu.be),
-  runs `yt-dlp --extract-audio --audio-format mp3 --audio-quality 5` into a
-  temp dir, streams the file back with the video title as filename, and cleans
-  up the temp dir.
+  runs `yt-dlp --extract-audio --audio-format mp3 --audio-quality 5` with the
+  bundled/downloaded yt-dlp and the `ffmpeg-static` binary, streams the MP3
+  back, and cleans up the temp dir. The response is streamed, which avoids
+  Vercel's 4.5 MB response-body limit.
+- `scripts/fetch-ytdlp.mjs` — downloads the latest official yt-dlp binary for
+  the current platform into `bin/`.
+- `next.config.ts` — `outputFileTracingIncludes` packs `bin/yt-dlp` and the
+  ffmpeg binary into the serverless function.
 
-## Deployment
+## Deploying to Vercel
 
-**Vercel will not work for this app.** Serverless functions can't run the
-`yt-dlp`/`ffmpeg` binaries, Hobby-plan responses are capped at ~4.5 MB, and
-YouTube often blocks datacenter IPs.
+This works on Vercel's Hobby plan (Fluid compute, `maxDuration` 300s):
 
-Deploy the included `Dockerfile` (yt-dlp + ffmpeg preinstalled) to a container
-host instead — Railway, Render, Fly.io, or any VPS:
+1. Push to GitHub and import the repo at [vercel.com/new](https://vercel.com/new).
+2. No settings needed. Vercel runs the `vercel-build` script, which downloads
+   the latest Linux yt-dlp binary, then runs `next build` with the binaries
+   traced into the function.
+3. Redeploy (without build cache) whenever you want a newer yt-dlp.
+
+Notes:
+
+- YouTube sometimes blocks datacenter IPs with "Sign in to confirm you're not
+  a bot". If that happens: export cookies from a throwaway browser session as
+  a Netscape-format `cookies.txt`, base64-encode it (`base64 -i cookies.txt`),
+  and set the result as the `YT_DLP_COOKIES` env var in your Vercel project.
+  Treat that value like a password.
+
+## Docker / other hosts
+
+Any container host works too (Railway, Render, Fly.io, a VPS). The included
+`Dockerfile` installs yt-dlp and ffmpeg itself:
 
 ```bash
 docker build -t ytb .
 docker run -p 3000:3000 ytb
 ```
-
-Update `yt-dlp` inside the image periodically (or rebuild it) since old
-versions stop working when YouTube changes their site.
